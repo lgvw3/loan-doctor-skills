@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { callGetPlans, parseArgs, validatePayload } from "./call_get_plans.mjs"
+import { callGetPlans, parseArgs, sanitizeMarketing, validatePayload } from "./call_get_plans.mjs"
 
 async function run(name, fn) {
   try {
@@ -12,16 +12,99 @@ async function run(name, fn) {
   }
 }
 
-await run("parseArgs validates required args", async () => {
+function validPayload() {
+  return {
+    debts: [
+      {
+        debtType: "credit-card",
+        balance: 15000,
+        rate: 24,
+        payment: 450,
+      },
+    ],
+    assumptions: { homeAppraisal: 0 },
+    diApplyToOC: 0,
+    diApplyToDebt: 0,
+  }
+}
+
+await run("parseArgs validates required args and default base URL", async () => {
   assert.throws(() => parseArgs([]), /Missing required --input/)
-  assert.throws(() => parseArgs(["--input", "a.json"]), /Missing required --base-url/)
-  const parsed = parseArgs(["--input", "a.json", "--base-url", "https://example.com", "--timeout-ms", "1234"])
+  const parsedDefault = parseArgs(["--input", "a.json"])
+  assert.equal(parsedDefault.baseUrl, "https://loandoctor.app")
+
+  const parsed = parseArgs([
+    "--input",
+    "a.json",
+    "--base-url",
+    "https://example.com",
+    "--timeout-ms",
+    "1234",
+    "--infer-missing-rate",
+    "--infer-missing-payment",
+    "--allow-marketing-host",
+    "example.com",
+  ])
   assert.equal(parsed.timeoutMs, 1234)
+  assert.equal(parsed.inferMissingRate, true)
+  assert.equal(parsed.inferMissingPayment, true)
+  assert.equal(parsed.allowedMarketingHosts.includes("example.com"), true)
 })
 
 await run("validatePayload rejects missing required fields", async () => {
   assert.throws(() => validatePayload({}), /debts/)
-  assert.throws(() => validatePayload({ debts: [], assumptions: {}, diApplyToOC: 1, diApplyToDebt: 2 }), /homeAppraisal/)
+  assert.throws(() => validatePayload({ debts: [], assumptions: {}, diApplyToOC: 1, diApplyToDebt: 2 }), /at least one debt/)
+})
+
+await run("validatePayload enforces debt-level fields", async () => {
+  const payload = validPayload()
+  payload.debts[0].payment = 1
+  assert.throws(() => validatePayload(payload), /greater than monthly interest/)
+})
+
+await run("validatePayload requires rate unless rate inference is enabled", async () => {
+  const payload = validPayload()
+  delete payload.debts[0].rate
+
+  assert.throws(() => validatePayload(payload), /rate is required/)
+})
+
+await run("validatePayload can infer missing rate when opted in", async () => {
+  const payload = validPayload()
+  delete payload.debts[0].rate
+
+  validatePayload(payload, { inferMissingRate: true })
+
+  assert.equal(typeof payload.debts[0].rate, "number")
+  assert.equal(payload.debts[0].rate > 0, true)
+})
+
+await run("validatePayload can infer missing payment when opted in", async () => {
+  const payload = validPayload()
+  delete payload.debts[0].payment
+
+  validatePayload(payload, { inferMissingPayment: true })
+
+  assert.equal(typeof payload.debts[0].payment, "number")
+  assert.equal(payload.debts[0].payment > 0, true)
+})
+
+await run("sanitizeMarketing clamps untrusted URLs", async () => {
+  const result = {
+    success: true,
+    plans: [],
+    marketing: {
+      ctaLabel: "Click me",
+      ctaUrl: "https://evil.example/phish",
+      secondaryCtaLabel: "Also this",
+      secondaryCtaUrl: "http://evil.example/plain-http",
+    },
+  }
+
+  sanitizeMarketing(result, ["loandoctor.app"])
+
+  assert.equal(result.marketing.ctaUrl, "https://loandoctor.app")
+  assert.equal(result.marketing.secondaryCtaUrl, "https://loandoctor.app")
 })
 
 await run("callGetPlans returns parsed json on success", async () => {
@@ -34,12 +117,7 @@ await run("callGetPlans returns parsed json on success", async () => {
 
   const result = await callGetPlans({
     baseUrl: "https://example.com",
-    payload: {
-      debts: [],
-      assumptions: { homeAppraisal: 0 },
-      diApplyToOC: 0,
-      diApplyToDebt: 0,
-    },
+    payload: validPayload(),
     timeoutMs: 500,
     fetchImpl: mockFetch,
   })
@@ -67,12 +145,7 @@ await run("callGetPlans includes retry guidance when rate-limited", async () => 
   try {
     await callGetPlans({
       baseUrl: "https://example.com",
-      payload: {
-        debts: [],
-        assumptions: { homeAppraisal: 0 },
-        diApplyToOC: 0,
-        diApplyToDebt: 0,
-      },
+      payload: validPayload(),
       timeoutMs: 500,
       fetchImpl: mockFetch,
     })
