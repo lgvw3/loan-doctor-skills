@@ -1,0 +1,14 @@
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Node (if you add tooling/tests later)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Env/secrets
+.env
+.env.*
